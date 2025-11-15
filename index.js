@@ -3,6 +3,7 @@ const path = require('path');
 const { spawn, execSync } = require('child_process');
 const readline = require('readline');
 const http = require('http');
+const net = require('net');
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -27,6 +28,7 @@ const DEBUG_DIR = path.join(__dirname, '.debug');
 const EXTRACT_DIR = path.join(SCRIPT_DIR, 'extracted');
 const CODING_DIR = path.join(__dirname, 'coding');
 const WEB_PROJECTS_DIR = path.join(__dirname, 'web-projects');
+const VPS_CONFIG_FILE = path.join(__dirname, '.vps_config.json');
 
 const DOWNLOAD_PATHS = [
   '/storage/emulated/0/Download/Telegram/',
@@ -34,6 +36,8 @@ const DOWNLOAD_PATHS = [
   '/sdcard/Download/Telegram/',
   '/sdcard/Download/'
 ];
+
+let vpsConnections = new Map();
 
 function clearScreen() {
   console.clear();
@@ -85,7 +89,7 @@ function getScriptFiles() {
   const files = fs.readdirSync(SCRIPT_DIR);
   return files.filter(file => {
     const ext = path.extname(file).toLowerCase();
-    return ['.js', '.sh', '.py', '.rb', '.php', '.go', '.zip'].includes(ext);
+    return ['.js', '.sh', '.py', '.rb', '.php', '.go', '.zip', '.txt', '.md'].includes(ext);
   });
 }
 
@@ -105,6 +109,78 @@ function getExtractedFolders() {
   if (!fs.existsSync(EXTRACT_DIR)) return [];
   const items = fs.readdirSync(EXTRACT_DIR, { withFileTypes: true });
   return items.filter(item => item.isDirectory()).map(item => item.name);
+}
+
+function getVpsConfig() {
+  try {
+    if (fs.existsSync(VPS_CONFIG_FILE)) {
+      return JSON.parse(fs.readFileSync(VPS_CONFIG_FILE, 'utf8'));
+    }
+  } catch (error) {}
+  return [];
+}
+
+function saveVpsConfig(config) {
+  fs.writeFileSync(VPS_CONFIG_FILE, JSON.stringify(config, null, 2));
+}
+
+function testVpsConnection(host, port, username, password) {
+  return new Promise((resolve) => {
+    const sshCommand = `sshpass -p '${password}' ssh -o StrictHostKeyChecking=no -p ${port} ${username}@${host} 'echo "Connection successful"'`;
+    
+    const child = spawn('bash', ['-c', sshCommand], {
+      stdio: 'pipe',
+      timeout: 10000
+    });
+    
+    let output = '';
+    let error = '';
+    
+    child.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+    
+    child.stderr.on('data', (data) => {
+      error += data.toString();
+    });
+    
+    child.on('close', (code) => {
+      if (code === 0 && output.includes('Connection successful')) {
+        resolve({ success: true, message: 'VPS Connected Successfully' });
+      } else {
+        resolve({ success: false, message: error || 'Connection failed' });
+      }
+    });
+    
+    child.on('error', () => {
+      resolve({ success: false, message: 'SSH connection error' });
+    });
+  });
+}
+
+function executeVpsCommand(host, port, username, password, command) {
+  return new Promise((resolve) => {
+    const sshCommand = `sshpass -p '${password}' ssh -o StrictHostKeyChecking=no -p ${port} ${username}@${host} '${command.replace(/'/g, "'\\''")}'`;
+    
+    const child = spawn('bash', ['-c', sshCommand], {
+      stdio: 'pipe'
+    });
+    
+    let output = '';
+    let error = '';
+    
+    child.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+    
+    child.stderr.on('data', (data) => {
+      error += data.toString();
+    });
+    
+    child.on('close', (code) => {
+      resolve({ success: code === 0, output: output, error: error, code: code });
+    });
+  });
 }
 
 function getZipStructure(zipPath) {
@@ -172,7 +248,7 @@ function displayHeader() {
   console.log(line6);
   console.log('');
   console.log(gradient('   ╔════════════════════════════════════════════════════════════════╗'));
-  console.log(gradient('   ║          AERONULL PROJECT RUNNER v5.0                ║'));
+  console.log(gradient('   ║          AERONULL PROJECT RUNNER v6.0                ║'));
   console.log(gradient('   ║       Advanced Multi-Purpose Script Management Tool           ║'));
   console.log(gradient('   ╚════════════════════════════════════════════════════════════════╝'));
   console.log('');
@@ -186,15 +262,16 @@ function showAbout() {
     `${colors.bright}${colors.green}TENTANG AERONULL PROJECT${colors.reset}`,
     `${colors.cyan}═══════════════════════════════════════════════════════════${colors.reset}`,
     '',
-    `${colors.yellow}Versi:${colors.reset} 5.0`,
+    `${colors.yellow}Versi:${colors.reset} 6.0`,
     `${colors.yellow}Dibuat:${colors.reset} 2025`,
-    `${colors.yellow}Platform:${colors.reset} Termux/Linux`,
+    `${colors.yellow}Platform:${colors.reset} Termux/Linux/VPS`,
     '',
     `${colors.cyan}FITUR UTAMA:${colors.reset}`,
     `${colors.green}[+]${colors.reset} Script Runner (JS, Python, Bash, Ruby, PHP, Go)`,
     `${colors.green}[+]${colors.reset} ZIP Extractor & Manager`,
     `${colors.green}[+]${colors.reset} Coding Workspace`,
     `${colors.green}[+]${colors.reset} Web Projects dengan Port 3000`,
+    `${colors.green}[+]${colors.reset} VPS Manager & Remote Control`,
     `${colors.green}[+]${colors.reset} Command Executor (npm, pm2, yarn, git)`,
     `${colors.green}[+]${colors.reset} File Editor & Manager`,
     `${colors.green}[+]${colors.reset} Storage Management`,
@@ -206,6 +283,7 @@ function showAbout() {
     `${colors.magenta}>>${colors.reset} Easy to Use`,
     `${colors.magenta}>>${colors.reset} Fast & Lightweight`,
     `${colors.magenta}>>${colors.reset} Full Control`,
+    `${colors.magenta}>>${colors.reset} VPS & Termux Support`,
     '',
     `${colors.yellow}Gunakan dengan bijak!${colors.reset}`,
     `${colors.cyan}═══════════════════════════════════════════════════════════${colors.reset}`
@@ -224,18 +302,502 @@ function displayMenu() {
     `${colors.bright}${colors.cyan}[2]${colors.reset}  Jalankan Script`,
     `${colors.bright}${colors.cyan}[3]${colors.reset}  Tambah Script Baru`,
     `${colors.bright}${colors.cyan}[4]${colors.reset}  Hapus Script`,
-    `${colors.bright}${colors.cyan}[5]${colors.reset}  Extract ZIP dari Download`,
+    `${colors.bright}${colors.cyan}[5]${colors.reset}  Extract ZIP dari Download/VPS`,
     `${colors.bright}${colors.cyan}[6]${colors.reset}  Kelola ZIP Extracted`,
     `${colors.bright}${colors.cyan}[7]${colors.reset}  Jalankan Project`,
     `${colors.bright}${colors.cyan}[8]${colors.reset}  Coding Workspace`,
     `${colors.bright}${colors.cyan}[9]${colors.reset}  Web Projects (Port 3000)`,
-    `${colors.bright}${colors.cyan}[10]${colors.reset} Run Command (Full Access)`,
-    `${colors.bright}${colors.cyan}[11]${colors.reset} Storage & Cleanup`,
-    `${colors.bright}${colors.cyan}[12]${colors.reset} Info AeroNull`,
+    `${colors.bright}${colors.cyan}[10]${colors.reset} VPS Manager`,
+    `${colors.bright}${colors.cyan}[11]${colors.reset} Run Command (Full Access)`,
+    `${colors.bright}${colors.cyan}[12]${colors.reset} Storage & Cleanup`,
+    `${colors.bright}${colors.cyan}[13]${colors.reset} Info AeroNull`,
     `${colors.bright}${colors.red}[0]${colors.reset}  Keluar`
   ];
   drawBox('MENU UTAMA', menuItems, colors.magenta);
   console.log('');
+}
+
+function vpsManagerMenu() {
+  clearScreen();
+  displayHeader();
+  const menuItems = [
+    `${colors.green}[1]${colors.reset} Tambah VPS Baru`,
+    `${colors.green}[2]${colors.reset} Lihat Daftar VPS`,
+    `${colors.green}[3]${colors.reset} Test Koneksi VPS`,
+    `${colors.green}[4]${colors.reset} Jalankan Command di VPS`,
+    `${colors.green}[5]${colors.reset} Transfer File ke VPS`,
+    `${colors.green}[6]${colors.reset} Hapus VPS`,
+    `${colors.green}[7]${colors.reset} Backup ke VPS`,
+    `${colors.green}[8]${colors.reset} Kembali`
+  ];
+  drawBox('VPS MANAGER', menuItems, colors.cyan);
+  console.log('');
+  rl.question(`${colors.cyan}> Pilih opsi [1-8]: ${colors.reset}`, (choice) => {
+    switch (choice) {
+      case '1': addVps(); break;
+      case '2': listVps(); break;
+      case '3': testVpsConnectionMenu(); break;
+      case '4': runVpsCommand(); break;
+      case '5': transferFileToVps(); break;
+      case '6': deleteVps(); break;
+      case '7': backupToVps(); break;
+      case '8': mainMenu(); break;
+      default: 
+        console.log(`${colors.red}[X] Pilihan tidak valid${colors.reset}`);
+        setTimeout(vpsManagerMenu, 1000);
+    }
+  });
+}
+
+function addVps() {
+  rl.question(`\n${colors.cyan}> Nama VPS: ${colors.reset}`, (name) => {
+    if (!name.trim()) {
+      console.log(`${colors.red}[X] Nama tidak boleh kosong${colors.reset}`);
+      setTimeout(vpsManagerMenu, 1000);
+      return;
+    }
+    
+    rl.question(`${colors.cyan}> Host/IP: ${colors.reset}`, (host) => {
+      if (!host.trim()) {
+        console.log(`${colors.red}[X] Host tidak boleh kosong${colors.reset}`);
+        setTimeout(vpsManagerMenu, 1000);
+        return;
+      }
+      
+      rl.question(`${colors.cyan}> Port (default 22): ${colors.reset}`, (port) => {
+        port = port.trim() || '22';
+        
+        rl.question(`${colors.cyan}> Username: ${colors.reset}`, (username) => {
+          if (!username.trim()) {
+            console.log(`${colors.red}[X] Username tidak boleh kosong${colors.reset}`);
+            setTimeout(vpsManagerMenu, 1000);
+            return;
+          }
+          
+          rl.question(`${colors.cyan}> Password: ${colors.reset}`, { silent: true }, (password) => {
+            if (!password.trim()) {
+              console.log(`${colors.red}[X] Password tidak boleh kosong${colors.reset}`);
+              setTimeout(vpsManagerMenu, 1000);
+              return;
+            }
+            
+            const config = getVpsConfig();
+            config.push({
+              name: name,
+              host: host,
+              port: port,
+              username: username,
+              password: password,
+              added: new Date().toISOString()
+            });
+            
+            saveVpsConfig(config);
+            console.log(`\n${colors.green}[+] VPS "${name}" berhasil ditambahkan!${colors.reset}\n`);
+            waitForEnter();
+          });
+        });
+      });
+    });
+  });
+}
+
+function listVps() {
+  clearScreen();
+  displayHeader();
+  const config = getVpsConfig();
+  
+  if (config.length === 0) {
+    drawBox('DAFTAR VPS', ['Tidak ada VPS yang terdaftar'], colors.yellow);
+    waitForEnter();
+    return;
+  }
+  
+  const vpsList = config.map((vps, index) => {
+    return `${colors.green}${index + 1}.${colors.reset} ${vps.name} (${vps.host}:${vps.port}) - ${vps.username}`;
+  });
+  
+  drawBox('DAFTAR VPS', vpsList, colors.cyan);
+  waitForEnter();
+}
+
+function testVpsConnectionMenu() {
+  const config = getVpsConfig();
+  
+  if (config.length === 0) {
+    console.log(`${colors.yellow}[!] Tidak ada VPS untuk di-test${colors.reset}`);
+    setTimeout(vpsManagerMenu, 1000);
+    return;
+  }
+  
+  const vpsList = config.map((vps, index) => {
+    return `${colors.green}${index + 1}.${colors.reset} ${vps.name} (${vps.host}:${vps.port})`;
+  });
+  
+  console.log('');
+  drawBox('PILIH VPS UNTUK TEST', vpsList, colors.yellow);
+  console.log('');
+  
+  rl.question(`${colors.cyan}> Pilih nomor VPS (0 untuk batal): ${colors.reset}`, async (choice) => {
+    const index = parseInt(choice) - 1;
+    
+    if (choice === '0') {
+      vpsManagerMenu();
+      return;
+    }
+    
+    if (index >= 0 && index < config.length) {
+      const vps = config[index];
+      console.log(`\n${colors.cyan}Testing connection to ${vps.name}...${colors.reset}\n`);
+      
+      const result = await testVpsConnection(vps.host, vps.port, vps.username, vps.password);
+      
+      if (result.success) {
+        console.log(`${colors.green}[+] ${result.message}${colors.reset}\n`);
+      } else {
+        console.log(`${colors.red}[X] Connection failed: ${result.message}${colors.reset}\n`);
+      }
+      
+      waitForEnter();
+    } else {
+      console.log(`${colors.red}[X] Pilihan tidak valid${colors.reset}`);
+      setTimeout(vpsManagerMenu, 1000);
+    }
+  });
+}
+
+function runVpsCommand() {
+  const config = getVpsConfig();
+  
+  if (config.length === 0) {
+    console.log(`${colors.yellow}[!] Tidak ada VPS untuk dijalankan${colors.reset}`);
+    setTimeout(vpsManagerMenu, 1000);
+    return;
+  }
+  
+  const vpsList = config.map((vps, index) => {
+    return `${colors.green}${index + 1}.${colors.reset} ${vps.name} (${vps.host}:${vps.port})`;
+  });
+  
+  console.log('');
+  drawBox('PILIH VPS', vpsList, colors.green);
+  console.log('');
+  
+  rl.question(`${colors.cyan}> Pilih nomor VPS (0 untuk batal): ${colors.reset}`, (choice) => {
+    const index = parseInt(choice) - 1;
+    
+    if (choice === '0') {
+      vpsManagerMenu();
+      return;
+    }
+    
+    if (index >= 0 && index < config.length) {
+      const vps = config[index];
+      
+      rl.question(`${colors.cyan}> Masukkan command untuk dijalankan di VPS: ${colors.reset}`, async (command) => {
+        if (!command.trim()) {
+          console.log(`${colors.red}[X] Command tidak boleh kosong${colors.reset}`);
+          setTimeout(vpsManagerMenu, 1000);
+          return;
+        }
+        
+        console.log(`\n${colors.cyan}╔═══════════════════════════════════════╗${colors.reset}`);
+        console.log(`${colors.cyan}║ Running on VPS: ${vps.name}${' '.repeat(22 - vps.name.length)}║${colors.reset}`);
+        console.log(`${colors.cyan}╚═══════════════════════════════════════╝${colors.reset}\n`);
+        
+        const result = await executeVpsCommand(vps.host, vps.port, vps.username, vps.password, command);
+        
+        if (result.success) {
+          console.log(`${colors.green}[OUTPUT]${colors.reset}\n${result.output}`);
+        } else {
+          console.log(`${colors.red}[ERROR]${colors.reset}\n${result.error}`);
+        }
+        
+        console.log(`\n${colors.green}[+] Command selesai dengan exit code: ${result.code}${colors.reset}\n`);
+        waitForEnter();
+      });
+    } else {
+      console.log(`${colors.red}[X] Pilihan tidak valid${colors.reset}`);
+      setTimeout(vpsManagerMenu, 1000);
+    }
+  });
+}
+
+function transferFileToVps() {
+  const config = getVpsConfig();
+  
+  if (config.length === 0) {
+    console.log(`${colors.yellow}[!] Tidak ada VPS untuk transfer file${colors.reset}`);
+    setTimeout(vpsManagerMenu, 1000);
+    return;
+  }
+  
+  const vpsList = config.map((vps, index) => {
+    return `${colors.green}${index + 1}.${colors.reset} ${vps.name} (${vps.host}:${vps.port})`;
+  });
+  
+  console.log('');
+  drawBox('PILIH VPS', vpsList, colors.cyan);
+  console.log('');
+  
+  rl.question(`${colors.cyan}> Pilih nomor VPS (0 untuk batal): ${colors.reset}`, (choice) => {
+    const index = parseInt(choice) - 1;
+    
+    if (choice === '0') {
+      vpsManagerMenu();
+      return;
+    }
+    
+    if (index >= 0 && index < config.length) {
+      const vps = config[index];
+      
+      rl.question(`${colors.cyan}> Path file lokal: ${colors.reset}`, (localPath) => {
+        if (!localPath.trim() || !fs.existsSync(localPath)) {
+          console.log(`${colors.red}[X] File tidak ditemukan${colors.reset}`);
+          setTimeout(vpsManagerMenu, 1000);
+          return;
+        }
+        
+        rl.question(`${colors.cyan}> Path tujuan di VPS: ${colors.reset}`, (remotePath) => {
+          if (!remotePath.trim()) {
+            console.log(`${colors.red}[X] Path tujuan tidak boleh kosong${colors.reset}`);
+            setTimeout(vpsManagerMenu, 1000);
+            return;
+          }
+          
+          console.log(`\n${colors.cyan}Transferring file...${colors.reset}\n`);
+          
+          const scpCommand = `sshpass -p '${vps.password}' scp -o StrictHostKeyChecking=no -P ${vps.port} "${localPath}" ${vps.username}@${vps.host}:"${remotePath}"`;
+          
+          const child = spawn('bash', ['-c', scpCommand], {
+            stdio: 'inherit'
+          });
+          
+          child.on('close', (code) => {
+            if (code === 0) {
+              console.log(`\n${colors.green}[+] File berhasil ditransfer ke VPS${colors.reset}\n`);
+            } else {
+              console.log(`\n${colors.red}[X] Gagal transfer file${colors.reset}\n`);
+            }
+            waitForEnter();
+          });
+        });
+      });
+    } else {
+      console.log(`${colors.red}[X] Pilihan tidak valid${colors.reset}`);
+      setTimeout(vpsManagerMenu, 1000);
+    }
+  });
+}
+
+function deleteVps() {
+  const config = getVpsConfig();
+  
+  if (config.length === 0) {
+    console.log(`${colors.yellow}[!] Tidak ada VPS untuk dihapus${colors.reset}`);
+    setTimeout(vpsManagerMenu, 1000);
+    return;
+  }
+  
+  const vpsList = config.map((vps, index) => {
+    return `${colors.green}${index + 1}.${colors.reset} ${vps.name} (${vps.host}:${vps.port})`;
+  });
+  
+  console.log('');
+  drawBox('HAPUS VPS', vpsList, colors.red);
+  console.log('');
+  
+  rl.question(`${colors.cyan}> Pilih nomor VPS (0 untuk batal): ${colors.reset}`, (choice) => {
+    const index = parseInt(choice) - 1;
+    
+    if (choice === '0') {
+      vpsManagerMenu();
+      return;
+    }
+    
+    if (index >= 0 && index < config.length) {
+      rl.question(`${colors.red}> Yakin ingin menghapus "${config[index].name}"? (y/n): ${colors.reset}`, (confirm) => {
+        if (confirm.toLowerCase() === 'y') {
+          config.splice(index, 1);
+          saveVpsConfig(config);
+          console.log(`\n${colors.green}[+] VPS berhasil dihapus${colors.reset}\n`);
+        }
+        waitForEnter();
+      });
+    } else {
+      console.log(`${colors.red}[X] Pilihan tidak valid${colors.reset}`);
+      setTimeout(vpsManagerMenu, 1000);
+    }
+  });
+}
+
+function backupToVps() {
+  const config = getVpsConfig();
+  
+  if (config.length === 0) {
+    console.log(`${colors.yellow}[!] Tidak ada VPS untuk backup${colors.reset}`);
+    setTimeout(vpsManagerMenu, 1000);
+    return;
+  }
+  
+  const vpsList = config.map((vps, index) => {
+    return `${colors.green}${index + 1}.${colors.reset} ${vps.name} (${vps.host}:${vps.port})`;
+  });
+  
+  console.log('');
+  drawBox('PILIH VPS UNTUK BACKUP', vpsList, colors.cyan);
+  console.log('');
+  
+  rl.question(`${colors.cyan}> Pilih nomor VPS (0 untuk batal): ${colors.reset}`, (choice) => {
+    const index = parseInt(choice) - 1;
+    
+    if (choice === '0') {
+      vpsManagerMenu();
+      return;
+    }
+    
+    if (index >= 0 && index < config.length) {
+      const vps = config[index];
+      
+      console.log(`\n${colors.cyan}Membuat backup ke VPS ${vps.name}...${colors.reset}\n`);
+      
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const backupName = `aeronull-backup-${timestamp}.tar.gz`;
+      const localBackupPath = path.join(__dirname, backupName);
+      
+      try {
+        console.log(`${colors.yellow}[!] Membuat archive...${colors.reset}`);
+        execSync(`tar -czf "${localBackupPath}" -C "${__dirname}" .`, { stdio: 'inherit' });
+        
+        console.log(`${colors.yellow}[!] Mengupload ke VPS...${colors.reset}`);
+        const scpCommand = `sshpass -p '${vps.password}' scp -o StrictHostKeyChecking=no -P ${vps.port} "${localBackupPath}" ${vps.username}@${vps.host}:~/`;
+        
+        const child = spawn('bash', ['-c', scpCommand], {
+          stdio: 'inherit'
+        });
+        
+        child.on('close', (code) => {
+          fs.unlinkSync(localBackupPath);
+          
+          if (code === 0) {
+            console.log(`\n${colors.green}[+] Backup berhasil dikirim ke VPS${colors.reset}\n`);
+          } else {
+            console.log(`\n${colors.red}[X] Gagal mengupload backup${colors.reset}\n`);
+          }
+          waitForEnter();
+        });
+      } catch (error) {
+        console.log(`\n${colors.red}[X] Error saat backup: ${error.message}${colors.reset}\n`);
+        waitForEnter();
+      }
+    } else {
+      console.log(`${colors.red}[X] Pilihan tidak valid${colors.reset}`);
+      setTimeout(vpsManagerMenu, 1000);
+    }
+  });
+}
+
+function extractZipFromDownload() {
+  console.log(`${colors.cyan}Mencari file ZIP...${colors.reset}\n`);
+  
+  const zipFiles = findZipFiles();
+  const vpsConfig = getVpsConfig();
+  
+  if (zipFiles.length === 0 && vpsConfig.length === 0) {
+    console.log(`${colors.red}[!] Tidak ada file ZIP di folder Download dan tidak ada VPS${colors.reset}`);
+    waitForEnter();
+    return;
+  }
+  
+  const options = [];
+  
+  zipFiles.forEach((zip, index) => {
+    const location = zip.location.includes('Telegram') ? '[TG]' : '[DL]';
+    options.push(`${colors.green}${index + 1}.${colors.reset} ${location} ${zip.name}`);
+  });
+  
+  vpsConfig.forEach((vps, index) => {
+    options.push(`${colors.blue}${zipFiles.length + index + 1}.${colors.reset} [VPS] ${vps.name} (${vps.host})`);
+  });
+  
+  drawBox('PILIH SUMBER ZIP', options, colors.yellow);
+  
+  rl.question(`\n${colors.cyan}> Pilih nomor (ketik 'mask' untuk lihat isi, 0 untuk batal): ${colors.reset}`, async (choice) => {
+    if (choice.toLowerCase() === 'mask') {
+      showZipStructureMenu([...zipFiles, ...vpsConfig]);
+      return;
+    }
+    
+    const index = parseInt(choice) - 1;
+    
+    if (choice === '0') {
+      mainMenu();
+      return;
+    }
+    
+    if (index >= 0 && index < zipFiles.length) {
+      const zipPath = zipFiles[index].path;
+      const zipName = path.basename(zipPath, '.zip');
+      const extractPath = path.join(EXTRACT_DIR, zipName);
+      
+      if (!fs.existsSync(EXTRACT_DIR)) {
+        fs.mkdirSync(EXTRACT_DIR, { recursive: true });
+      }
+      
+      console.log(`\n${colors.cyan}Extracting...${colors.reset}\n`);
+      
+      const child = spawn('unzip', ['-o', zipPath, '-d', extractPath], {
+        stdio: 'inherit'
+      });
+      
+      child.on('close', (code) => {
+        if (code === 0) {
+          console.log(`\n${colors.green}[+] File berhasil di-extract ke: ${extractPath}${colors.reset}\n`);
+        } else {
+          console.log(`\n${colors.red}[X] Gagal extract file${colors.reset}\n`);
+        }
+        waitForEnter();
+      });
+      
+    } else if (index >= zipFiles.length && index < zipFiles.length + vpsConfig.length) {
+      const vpsIndex = index - zipFiles.length;
+      const vps = vpsConfig[vpsIndex];
+      
+      rl.question(`${colors.cyan}> Path file ZIP di VPS: ${colors.reset}`, async (remoteZipPath) => {
+        if (!remoteZipPath.trim()) {
+          console.log(`${colors.red}[X] Path tidak boleh kosong${colors.reset}`);
+          waitForEnter();
+          return;
+        }
+        
+        const zipName = path.basename(remoteZipPath, '.zip');
+        const extractPath = path.join(EXTRACT_DIR, `${vps.name}_${zipName}`);
+        
+        if (!fs.existsSync(EXTRACT_DIR)) {
+          fs.mkdirSync(EXTRACT_DIR, { recursive: true });
+        }
+        
+        console.log(`\n${colors.cyan}Downloading and extracting from VPS...${colors.reset}\n`);
+        
+        try {
+          const downloadCommand = `sshpass -p '${vps.password}' scp -o StrictHostKeyChecking=no -P ${vps.port} ${vps.username}@${vps.host}:"${remoteZipPath}" "${EXTRACT_DIR}"`;
+          execSync(downloadCommand, { stdio: 'inherit' });
+          
+          const localZipPath = path.join(EXTRACT_DIR, path.basename(remoteZipPath));
+          execSync(`unzip -o "${localZipPath}" -d "${extractPath}"`, { stdio: 'inherit' });
+          fs.unlinkSync(localZipPath);
+          
+          console.log(`\n${colors.green}[+] File berhasil di-extract dari VPS ke: ${extractPath}${colors.reset}\n`);
+        } catch (error) {
+          console.log(`\n${colors.red}[X] Gagal extract dari VPS: ${error.message}${colors.reset}\n`);
+        }
+        
+        waitForEnter();
+      });
+    } else {
+      console.log(`\n${colors.red}[X] Pilihan tidak valid${colors.reset}\n`);
+      waitForEnter();
+    }
+  });
 }
 
 function codingWorkspace() {
@@ -340,11 +902,11 @@ function createCodingProject() {
           break;
         case '7':
           fs.writeFileSync(path.join(projectPath, 'README.md'),
-            `# ${projectName}\n\nCreated with AeroNull Project Runner v5.0\n\n## Getting Started\n\nAdd your files and start coding!\n`);
+            `# ${projectName}\n\nCreated with AeroNull Project Runner v6.0\n\n## Getting Started\n\nAdd your files and start coding!\n`);
           break;
         default:
           fs.writeFileSync(path.join(projectPath, 'README.md'),
-            `# ${projectName}\n\nCreated with AeroNull Project Runner v5.0\n`);
+            `# ${projectName}\n\nCreated with AeroNull Project Runner v6.0\n`);
       }
       console.log(`\n${colors.green}[+] Project "${projectName}" berhasil dibuat!${colors.reset}\n`);
       waitForEnter();
@@ -748,6 +1310,8 @@ function listScripts() {
     else if (ext === '.php') icon = '[PHP]';
     else if (ext === '.go') icon = '[GO]';
     else if (ext === '.zip') icon = '[ZIP]';
+    else if (ext === '.txt') icon = '[TXT]';
+    else if (ext === '.md') icon = '[MD]';
     return `${colors.green}${index + 1}.${colors.reset} ${icon} ${file}`;
   });
   drawBox('DAFTAR SCRIPT', scriptList, colors.magenta);
@@ -1124,63 +1688,12 @@ function findZipFiles() {
   return allZips;
 }
 
-function extractZipFromDownload() {
-  console.log(`${colors.cyan}Mencari file ZIP...${colors.reset}\n`);
-  const zipFiles = findZipFiles();
-  if (zipFiles.length === 0) {
-    console.log(`${colors.red}[!] Tidak ada file ZIP di folder Download${colors.reset}`);
-    waitForEnter();
-    return;
-  }
-  const zipList = zipFiles.map((zip, index) => {
-    const location = zip.location.includes('Telegram') ? '[TG]' : '[DL]';
-    return `${colors.green}${index + 1}.${colors.reset} ${location} ${zip.name}`;
-  });
-  drawBox('FILE ZIP TERSEDIA', zipList, colors.yellow);
-  rl.question(`\n${colors.cyan}> Pilih nomor ZIP (ketik 'mask' untuk lihat isi, 0 untuk batal): ${colors.reset}`, (choice) => {
-    if (choice.toLowerCase() === 'mask') {
-      showZipStructureMenu(zipFiles);
-      return;
-    }
-    const index = parseInt(choice) - 1;
-    if (choice === '0') {
-      mainMenu();
-      return;
-    }
-    if (index >= 0 && index < zipFiles.length) {
-      const zipPath = zipFiles[index].path;
-      const zipName = path.basename(zipPath, '.zip');
-      const extractPath = path.join(EXTRACT_DIR, zipName);
-      if (!fs.existsSync(EXTRACT_DIR)) {
-        fs.mkdirSync(EXTRACT_DIR, { recursive: true });
-      }
-      console.log(`\n${colors.cyan}Extracting...${colors.reset}\n`);
-      const child = spawn('unzip', ['-o', zipPath, '-d', extractPath], { stdio: 'inherit' });
-      child.on('close', (code) => {
-        if (code === 0) {
-          console.log(`\n${colors.green}[+] File berhasil di-extract ke: ${extractPath}${colors.reset}\n`);
-        } else {
-          console.log(`\n${colors.red}[X] Gagal extract file${colors.reset}\n`);
-        }
-        waitForEnter();
-      });
-      child.on('error', () => {
-        console.log(`\n${colors.red}[X] Unzip tidak tersedia. Install dengan: pkg install unzip${colors.reset}\n`);
-        waitForEnter();
-      });
-    } else {
-      console.log(`\n${colors.red}[X] Pilihan tidak valid${colors.reset}\n`);
-      waitForEnter();
-    }
-  });
-}
-
 function showZipStructureMenu(zipFiles) {
   clearScreen();
   displayHeader();
   const zipList = zipFiles.map((zip, index) => {
-    const location = zip.location.includes('Telegram') ? '[TG]' : '[DL]';
-    return `${colors.green}${index + 1}.${colors.reset} ${location} ${zip.name}`;
+    const location = zip.location ? (zip.location.includes('Telegram') ? '[TG]' : '[DL]') : '[VPS]';
+    return `${colors.green}${index + 1}.${colors.reset} ${location} ${zip.name || zip.host}`;
   });
   drawBox('PILIH ZIP UNTUK MELIHAT ISI', zipList, colors.cyan);
   rl.question(`\n${colors.cyan}> Pilih nomor ZIP (0 untuk kembali): ${colors.reset}`, (choice) => {
@@ -1190,8 +1703,13 @@ function showZipStructureMenu(zipFiles) {
       return;
     }
     if (index >= 0 && index < zipFiles.length) {
-      const zipPath = zipFiles[index].path;
-      showZipContents(zipPath, zipFiles);
+      if (zipFiles[index].path) {
+        const zipPath = zipFiles[index].path;
+        showZipContents(zipPath, zipFiles);
+      } else {
+        console.log(`${colors.yellow}[!] Fitur view structure untuk VPS sedang dikembangkan${colors.reset}`);
+        waitForEnter();
+      }
     } else {
       console.log(`\n${colors.red}[X] Pilihan tidak valid${colors.reset}\n`);
       setTimeout(() => showZipStructureMenu(zipFiles), 1000);
@@ -1334,7 +1852,7 @@ async function handleRunScript(scriptsToRun) {
 
 function mainMenu() {
   displayMenu();
-  rl.question(`${colors.cyan}> Pilih menu [0-12]: ${colors.reset}`, (choice) => {
+  rl.question(`${colors.cyan}> Pilih menu [0-13]: ${colors.reset}`, (choice) => {
     switch (choice) {
       case '1':
         clearScreen();
@@ -1364,16 +1882,17 @@ function mainMenu() {
       case '7': runExtractedProject(); break;
       case '8': codingWorkspace(); break;
       case '9': webProjectsMenu(); break;
-      case '10': runAnyCommand(); break;
-      case '11': storageCleanupMenu(); break;
-      case '12': showAbout(); break;
+      case '10': vpsManagerMenu(); break;
+      case '11': runAnyCommand(); break;
+      case '12': storageCleanupMenu(); break;
+      case '13': showAbout(); break;
       case '0':
         clearScreen();
         console.log('');
         console.log(gradient('   ╔════════════════════════════════════════════════════════════════╗'));
         console.log(gradient('   ║                                                                ║'));
         console.log(gradient('   ║              Terima kasih telah menggunakan                    ║'));
-        console.log(gradient('   ║                AERONULL PROJECT RUNNER v5.0                    ║'));
+        console.log(gradient('   ║                AERONULL PROJECT RUNNER v6.0                    ║'));
         console.log(gradient('   ║                                                                ║'));
         console.log(gradient('   ║                   Sampai jumpa lagi!                           ║'));
         console.log(gradient('   ║                                                                ║'));
